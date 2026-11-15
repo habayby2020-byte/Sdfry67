@@ -1,0 +1,6 @@
+{
+  "name": "مكتبة ألعاب ليالي الرياض",
+  "description": "مكتبة ألعاب ليالي الرياض — تضم 22 لعبة جماعية جاهزة للإرسال والإضافة إلى شاشة التلفزيون.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

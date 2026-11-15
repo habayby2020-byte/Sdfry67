@@ -1,0 +1,363 @@
+name: Layali Riyadh APK
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  build:
+    name: Verify games and build APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Prepare complete game assets without replacing the app library
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from shutil import copy2, copytree
+          from html.parser import HTMLParser
+          from urllib.parse import urlsplit, unquote
+          import re
+
+          root = Path.cwd()
+          assets = root / "app/src/main/assets"
+          assets.mkdir(parents=True, exist_ok=True)
+
+          library_candidates = [
+              root / "public/مكتبة_الألعاب-2.html",
+              assets / "مكتبة_الألعاب-2.html",
+              root / "مكتبة_الألعاب-2.html",
+              assets / "مكتبة_الألعاب-1.html",
+          ]
+          library = next((p for p in library_candidates if p.is_file() and p.stat().st_size >= 1000), None)
+          if library is None:
+              raise SystemExit("The app-specific game library asset is missing or incomplete.")
+          # Android's asset path is ASCII to avoid filename/encoding edge cases in APK packaging.
+          copy2(library, assets / "game-library.html")
+          print(f"Using game library source: {library} ({library.stat().st_size} bytes)")
+
+          excluded_root = {"index.html", "مكتبة_الألعاب-1.html", "مكتبة_الألعاب-2.html"}
+
+          # Copy every standalone HTML game from the repository root.
+          root_games = sorted(p for p in root.glob("*.html") if p.name not in excluded_root)
+          if not root_games:
+              raise SystemExit("No standalone HTML game files were found.")
+          for src in root_games:
+              copy2(src, assets / src.name)
+
+          # Preserve the complete prepared-games directory tree and all relative resources.
+          prepared = root / "prepared-games"
+          if prepared.is_dir():
+              copytree(prepared, assets / "prepared-games", dirs_exist_ok=True)
+
+          # Bundle every standalone HTML game and the complete prepared-games tree.
+          from zipfile import ZipFile, ZIP_DEFLATED
+          bundle = assets / "game-files-bundle.zip"
+          with ZipFile(bundle, "w", ZIP_DEFLATED) as archive:
+              for game in root_games:
+                  archive.write(game, game.name)
+              if prepared.is_dir():
+                  for item in sorted(prepared.rglob("*")):
+                      if item.is_file():
+                          archive.write(item, item.relative_to(root).as_posix())
+          print(f"Complete game bundle created: {bundle.stat().st_size} bytes")
+
+          class References(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.refs = []
+              def handle_starttag(self, tag, attrs):
+                  for key, value in attrs:
+                      if key in ("src", "href", "poster") and value:
+                          self.refs.append(value)
+              def handle_data(self, data):
+                  pass
+
+          # Copy local resources referenced by every root-level game, preserving paths.
+          for game in root_games:
+              parser = References()
+              parser.feed(game.read_text(encoding="utf-8", errors="replace"))
+              source_text = game.read_text(encoding="utf-8", errors="replace")
+              refs = list(parser.refs)
+              refs += re.findall(r"url\(\s*['\"]?([^'\")]+)", source_text, re.I)
+              for ref in refs:
+                  ref = ref.strip()
+                  parts = urlsplit(ref)
+                  if parts.scheme or parts.netloc or not parts.path:
+                      continue
+                  rel = Path(unquote(parts.path).lstrip("/"))
+                  if ".." in rel.parts:
+                      raise SystemExit(f"Unsafe relative game asset path: {ref}")
+                  src = root / rel
+                  if src.is_file():
+                      dst = assets / rel
+                      dst.parent.mkdir(parents=True, exist_ok=True)
+                      copy2(src, dst)
+                  elif Path(parts.path).suffix.lower() in (
+                      ".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg",
+                      ".mp3", ".wav", ".ogg", ".mp4", ".webm",
+                      ".js", ".css", ".json", ".glb", ".gltf", ".bin",
+                      ".woff", ".woff2", ".ttf"
+                  ):
+                      print(f"WARNING: referenced local asset not present in repository: {game} -> {ref}")
+
+          if not (assets / "game-library.html").is_file():
+              raise SystemExit("Android library asset was not prepared.")
+          print(f"Prepared {len(root_games)} root-level HTML games.")
+          for game in root_games:
+              copied = assets / game.name
+              if not copied.is_file() or copied.stat().st_size != game.stat().st_size:
+                  raise SystemExit(f"Game file copy failed: {game}")
+              print(f"APK asset ready: {game.name} ({copied.stat().st_size} bytes)")
+          PY
+
+      - name: Check game HTML and inline JavaScript syntax
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from html.parser import HTMLParser
+          import subprocess, tempfile
+
+          class ScriptParser(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.scripts = []
+                  self.current = None
+              def handle_starttag(self, tag, attrs):
+                  if tag.lower() == "script":
+                      a = dict(attrs)
+                      self.current = {"attrs": a, "code": ""}
+              def handle_data(self, data):
+                  if self.current is not None:
+                      self.current["code"] += data
+              def handle_endtag(self, tag):
+                  if tag.lower() == "script" and self.current is not None:
+                      self.scripts.append(self.current)
+                      self.current = None
+
+          excluded_root = {"index.html", "مكتبة_الألعاب-1.html", "مكتبة_الألعاب-2.html"}
+          games = sorted(p for p in Path.cwd().glob("*.html") if p.name not in excluded_root)
+          games += sorted(Path("prepared-games").rglob("*.html")) if Path("prepared-games").exists() else []
+          targets = games + [Path("app/src/main/assets/game-library.html")]
+          checked = 0
+          with tempfile.TemporaryDirectory() as tmp:
+              for game in targets:
+                  html = game.read_text(encoding="utf-8", errors="replace")
+                  if "<html" not in html.lower() or "<body" not in html.lower():
+                      raise SystemExit(f"HTML document is incomplete: {game}")
+                  parser = ScriptParser()
+                  parser.feed(html)
+                  for index, item in enumerate(parser.scripts, 1):
+                      attrs = item["attrs"]
+                      code = item["code"]
+                      if attrs.get("src") or not code.strip():
+                          continue
+                      typ = attrs.get("type", "text/javascript").lower()
+                      if typ not in ("text/javascript", "application/javascript", "module"):
+                          continue
+                      ext = ".mjs" if typ == "module" else ".js"
+                      script = Path(tmp) / f"check_{checked}{ext}"
+                      script.write_text(code, encoding="utf-8")
+                      result = subprocess.run(
+                          ["node", "--check", str(script)],
+                          capture_output=True, text=True
+                      )
+                      if result.returncode:
+                          print(f"JavaScript syntax error: {game}, inline script #{index}")
+                          print(result.stderr)
+                          raise SystemExit(result.returncode)
+                      checked += 1
+                  print(f"HTML structure and inline scripts checked: {game}")
+          print(f"Inline JavaScript syntax checks passed: {checked}")
+          PY
+
+      - name: Browser smoke test for real embedded game startup
+        shell: bash
+        run: |
+          mkdir -p /tmp/pw
+          npm --prefix /tmp/pw install --no-save playwright
+          /tmp/pw/node_modules/.bin/playwright install chromium --with-deps
+          cat > /tmp/game-smoke-test.cjs <<'JS'
+          const { chromium } = require('/tmp/pw/node_modules/playwright');
+          const path = require('path');
+          const { pathToFileURL } = require('url');
+
+          (async () => {
+            const browser = await chromium.launch({
+              headless: true,
+              args: ['--no-sandbox', '--enable-webgl', '--use-gl=angle', '--use-angle=swiftshader']
+            });
+            let failed = false;
+
+            // Verify game-library.html loads all 22 cards cleanly
+            const libPage = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+            const libErrors = [];
+            libPage.on('pageerror', error => libErrors.push(error.message));
+            await libPage.goto(pathToFileURL(path.resolve('app/src/main/assets/game-library.html')).href, { waitUntil: 'domcontentloaded', timeout: 60000 });
+            await libPage.waitForTimeout(800);
+            const libState = await libPage.evaluate(() => ({
+              title: document.title,
+              cards: document.querySelectorAll('.card').length,
+              devMode: typeof DEV_MODE !== 'undefined' ? DEV_MODE : null
+            }));
+            console.log('LIBRARY:', JSON.stringify({ ...libState, pageErrors: libErrors }));
+            if (libState.cards !== 22 || libState.devMode !== false || libErrors.length) failed = true;
+            await libPage.close();
+
+            for (const file of ['tahadi_al_ashara (1).html', 'captain-bean-layali-riyadh (1).html']) {
+              for (const role of ['tv', 'ph']) {
+                const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+                const errors = [];
+                page.on('pageerror', error => errors.push(error.message));
+                await page.goto(pathToFileURL(path.resolve(file)).href, { waitUntil: 'domcontentloaded', timeout: 60000 });
+                const before = await page.locator('#root').innerText().catch(() => '');
+                await page.evaluate(role => {
+                  window.postMessage({ __emb: 1, init: true, role, code: 'TEST123', name: 'اختبار' }, '*');
+                }, role);
+                await page.waitForTimeout(1200);
+                const state = await page.evaluate(() => ({
+                  title: document.title,
+                  text: (document.body?.innerText || '').trim(),
+                  root: document.querySelector('#root')?.innerText || '',
+                  hidden: getComputedStyle(document.body).visibility === 'hidden',
+                  rootChildren: document.querySelector('#root')?.children.length || 0
+                }));
+                console.log(JSON.stringify({ file, role, before, ...state, pageErrors: errors }));
+                if (!state.title || state.hidden || state.rootChildren === 0 ||
+                    state.root.includes('افتحها من هناك') || errors.length) failed = true;
+                await page.close();
+              }
+            }
+            await browser.close();
+            if (failed) process.exit(1);
+          })().catch(error => { console.error(error); process.exit(1); });
+          JS
+          node /tmp/game-smoke-test.cjs
+
+      - name: Accept Android SDK licenses
+        shell: bash
+        run: |
+          SDK_DIR="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          if [ -n "$SDK_DIR" ] && [ -x "$SDK_DIR/cmdline-tools/latest/bin/sdkmanager" ]; then
+            yes | "$SDK_DIR/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null 2>&1 || true
+          fi
+
+      - name: Build APK only
+        run: gradle --no-daemon assembleDebug
+
+      - name: Verify all repository game files are packaged in the APK
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+          import hashlib
+
+          excluded_root = {"index.html", "مكتبة_الألعاب-1.html", "مكتبة_الألعاب-2.html"}
+          apk = next(Path("app/build/outputs/apk/debug").glob("*.apk"))
+          checks = [(p.name, p) for p in sorted(Path.cwd().glob("*.html")) if p.name not in excluded_root and p.name.isascii()]
+          checks.append(("game-library.html", Path("app/src/main/assets/game-library.html")))
+          missing = []
+          mismatched = []
+          with ZipFile(apk) as z:
+              names = set(z.namelist())
+              for asset_name, source in checks:
+                  entry = "assets/" + asset_name
+                  if entry not in names:
+                      missing.append(entry)
+                      continue
+                  actual = z.read(entry)
+                  if hashlib.sha256(actual).digest() != hashlib.sha256(source.read_bytes()).digest():
+                      mismatched.append(entry)
+                  else:
+                      print(f"VERIFIED {entry}: {len(actual)} bytes, SHA-256 matches")
+              if "assets/game-files-bundle.zip" not in names:
+                  raise SystemExit("APK is missing the complete game files bundle.")
+              import io
+              with ZipFile(io.BytesIO(z.read("assets/game-files-bundle.zip"))) as bundle:
+                  bundle_names = set(bundle.namelist())
+                  all_sources = [p for p in sorted(Path.cwd().glob("*.html")) if p.name not in excluded_root]
+                  all_sources += [p for p in sorted(Path("prepared-games").rglob("*")) if p.is_file()]
+                  for source in all_sources:
+                      rel = source.name if source.parent == Path.cwd() else source.as_posix()
+                      if rel not in bundle_names:
+                          missing.append("bundle/" + rel)
+                          continue
+                      if hashlib.sha256(bundle.read(rel)).digest() != hashlib.sha256(source.read_bytes()).digest():
+                          mismatched.append("bundle/" + rel)
+                      else:
+                          print(f"VERIFIED bundle/{rel}")
+          print(f"APK contains {len(names)} entries; checked {len(checks)} direct assets and full game bundle.")
+          if missing or mismatched:
+              print("MISSING ENTRIES:", missing)
+              print("CONTENT MISMATCHES:", mismatched)
+              raise SystemExit(1)
+          print(f"APK verified: {apk} ({apk.stat().st_size} bytes)")
+          PY
+
+      - name: Clean up old workflow artifacts
+        if: success() && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for id in $(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/artifacts" --jq '.artifacts[].id'); do
+            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}" >/dev/null 2>&1 || true
+          done
+
+      - name: Publish APK to GitHub Releases
+        if: success() && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          APK_FILE="$(ls app/build/outputs/apk/debug/*.apk | head -n 1)"
+          if [ -z "$APK_FILE" ] || [ ! -f "$APK_FILE" ]; then
+            echo "APK file not found" >&2
+            exit 1
+          fi
+          cp "$APK_FILE" /tmp/Layali-Riyadh-debug.apk
+          if gh release view latest-apk >/dev/null 2>&1; then
+            gh release upload latest-apk /tmp/Layali-Riyadh-debug.apk --clobber
+          else
+            gh release create latest-apk /tmp/Layali-Riyadh-debug.apk \
+              --title "Layali Riyadh APK (Latest)" \
+              --notes "Automated debug APK build (${GITHUB_SHA})" \
+              --target "$GITHUB_SHA"
+          fi
+
+      - name: Upload APK
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: Layali-Riyadh-APK
+          path: |
+            app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 9

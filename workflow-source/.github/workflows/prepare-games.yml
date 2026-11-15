@@ -1,0 +1,178 @@
+name: Prepare New Layali Riyadh Archive
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'العاب ليالي الرياض (١).zip'
+      - '.github/workflows/prepare-games.yml'
+      - 'مكتبة_الألعاب-1.html'
+      - 'app/src/main/assets/مكتبة_الألعاب-1.html'
+      - 'Rocket_Soccer-4.html'
+      - 'العاب ليالي الرياض (١).zip'
+      - '.github/workflows/prepare-games.yml'
+      - 'highway-race-1.html'
+
+permissions:
+  contents: write
+
+jobs:
+  prepare-games:
+    name: Extract and inspect game archives (NO APK BUILD)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract outer and nested ZIP files and create full manifest
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path, PurePosixPath
+          from zipfile import ZipFile
+          import json
+
+          root = Path("prepared-games")
+          root.mkdir(exist_ok=True)
+          outer = Path("العاب ليالي الرياض (١).zip")
+          if not outer.is_file():
+              raise SystemExit("ERROR: outer archive missing")
+
+          records = []
+          def safe_target(base, member):
+              name = member.replace("\\\\", "/")
+              rel = PurePosixPath(name)
+              if rel.is_absolute() or ".." in rel.parts:
+                  raise SystemExit(f"Unsafe archive path rejected: {name}")
+              return base.joinpath(*rel.parts), name
+
+          def unpack(archive_path, destination, depth=0):
+              if depth > 4:
+                  raise SystemExit("Nested ZIP depth exceeded safety limit")
+              with ZipFile(archive_path) as zf:
+                  for info in zf.infolist():
+                      if info.is_dir():
+                          continue
+                      target, member = safe_target(destination, info.filename)
+                      target.parent.mkdir(parents=True, exist_ok=True)
+                      with zf.open(info) as src, target.open("wb") as dst:
+                          dst.write(src.read())
+                      records.append({
+                          "path": str(target),
+                          "archive_member": member,
+                          "size_bytes": target.stat().st_size,
+                          "type": target.suffix.lower() or "(no extension)",
+                          "nested_level": depth
+                      })
+                      if target.suffix.lower() == ".zip":
+                          nested_dir = target.with_suffix("")
+                          nested_dir.mkdir(exist_ok=True)
+                          unpack(target, nested_dir, depth + 1)
+
+          unpack(outer, root)
+          manifest = {
+              "source_archive": outer.name,
+              "total_extracted_files_including_nested": len(records),
+              "html_files": [r for r in records if r["type"] in (".html", ".htm")],
+              "zip_files": [r for r in records if r["type"] == ".zip"],
+              "all_files": records
+          }
+          (root / "manifest.json").write_text(
+              json.dumps(manifest, ensure_ascii=False, indent=2),
+              encoding="utf-8"
+          )
+          print(f"Total files including nested archives: {len(records)}")
+          print(f"HTML files: {len(manifest['html_files'])}")
+          print(f"Nested ZIP files: {len(manifest['zip_files'])}")
+          for item in records:
+              print(f"- {item['path']} | {item['size_bytes']} bytes | {item['type']}")
+              p = Path(item["path"])
+              if p.name == "info.json":
+                  print("  INFO.JSON:", p.read_text(encoding="utf-8", errors="replace"))
+              elif p.suffix.lower() == ".html":
+                  import re
+                  html = p.read_text(encoding="utf-8", errors="replace")
+                  title = re.search(r"<title[^>]*>(.*?)</title>", html, re.I | re.S)
+                  print("  HTML TITLE:", re.sub(r"\\s+", " ", title.group(1)).strip() if title else "(no title tag)")
+          PY
+
+
+      - name: Validate embedded game HTML and JavaScript syntax
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import base64, re, subprocess, tempfile
+
+          expected_ids = [
+              "rocketSoccer3D", "highwayRace",
+              "challenges_pack", "cargo_empire_3d", "dira_market_3d",
+              "football_2d", "carrom_2d", "funny_games_pack"
+          ]
+          targets = [
+              Path("مكتبة_الألعاب-1.html"),
+              Path("app/src/main/assets/مكتبة_الألعاب-1.html"),
+                            Path("Rocket_Soccer-4.html"),
+              Path("highway-race-1.html"),
+          ]
+          targets += list(Path("prepared-games").rglob("*.html"))
+          virtual_pages = []
+          for library in targets[:2]:
+              source = library.read_text(encoding="utf-8", errors="replace")
+              for game_id in expected_ids:
+                  pattern = r'"id"\s*:\s*"' + re.escape(game_id) + r'"[\s\S]*?"b64"\s*:\s*"([^"]*)"'
+                  match = re.search(pattern, source)
+                  if not match or not match.group(1):
+                      raise SystemExit(f"Missing embedded HTML base64 for {game_id} in {library}")
+                  try:
+                      decoded = base64.b64decode(match.group(1), validate=True).decode("utf-8")
+                  except Exception as exc:
+                      raise SystemExit(f"Invalid base64/UTF-8 for {game_id} in {library}: {exc}")
+                  if "<html" not in decoded.lower() or "<title" not in decoded.lower():
+                      raise SystemExit(f"Decoded game HTML looks incomplete: {game_id} in {library}")
+                  virtual_pages.append((f"{library} -> {game_id}", decoded))
+
+          checked = 0
+          with tempfile.TemporaryDirectory() as tmp:
+              pages = [(str(p), p.read_text(encoding="utf-8", errors="replace")) for p in targets if p.is_file()]
+              pages += virtual_pages
+              for label, source in pages:
+                  for index, match in enumerate(re.finditer(r"<script\b([^>]*)>([\s\S]*?)</script\s*>", source, re.I)):
+                      attrs, code = match.group(1), match.group(2)
+                      if re.search(r"\bsrc\s*=", attrs, re.I) or not code.strip():
+                          continue
+                      typ = re.search(r"""\btype\s*=\s*["']([^"']+)["']""", attrs, re.I)
+                      if typ and typ.group(1).lower() not in ("text/javascript", "application/javascript", "module"):
+                          continue
+                      script = Path(tmp) / f"check_{checked}.js"
+                      script.write_text(code, encoding="utf-8")
+                      result = subprocess.run(["node", "--check", str(script)], capture_output=True, text=True)
+                      if result.returncode:
+                          print(f"SYNTAX ERROR: {label} inline script #{index + 1}")
+                          print(result.stderr)
+                          raise SystemExit(result.returncode)
+                      checked += 1
+          print(f"Embedded HTML checks passed: {len(virtual_pages)} game copies decoded; JavaScript syntax checks passed: {checked} inline scripts.")
+          PY
+
+      - name: Upload fully extracted files for inspection
+        uses: actions/upload-artifact@v4
+        with:
+          name: Layali-Riyadh-Fully-Extracted-Games
+          path: prepared-games/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Save extracted source files into repository for review
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add prepared-games/
+          if git diff --cached --quiet; then
+            echo "No extracted-file changes to commit."
+          else
+            git commit -m "Stage extracted Layali Riyadh game sources for review"
+            git pull --rebase origin main
+            git push
+          fi
