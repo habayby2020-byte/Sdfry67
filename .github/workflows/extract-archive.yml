@@ -1,0 +1,62 @@
+name: Extract project archive
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Extract ZIP safely
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import PurePosixPath
+          from zipfile import ZipFile
+          from pathlib import Path
+          import shutil
+
+          archive = Path("Swwd-main.zip")
+          if not archive.is_file():
+              raise SystemExit("Swwd-main.zip was not found")
+
+          with ZipFile(archive) as z:
+              entries = [i for i in z.infolist() if not i.is_dir()]
+              names = [PurePosixPath(i.filename) for i in entries]
+
+              # GitHub source archives normally contain one wrapper directory.
+              roots = {p.parts[0] for p in names if p.parts}
+              strip_root = next(iter(roots)) if len(roots) == 1 and all(len(p.parts) > 1 for p in names) else None
+
+              for info, path in zip(entries, names):
+                  if path.is_absolute() or ".." in path.parts:
+                      raise SystemExit(f"Unsafe ZIP path: {info.filename}")
+                  parts = path.parts[1:] if strip_root else path.parts
+                  if not parts:
+                      continue
+                  target = Path(*parts)
+                  if target.is_absolute() or ".." in target.parts:
+                      raise SystemExit(f"Unsafe extraction target: {target}")
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  with z.open(info) as src, target.open("wb") as dst:
+                      shutil.copyfileobj(src, dst)
+          PY
+
+      - name: Commit extracted files and remove temporary builder
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          rm -f .github/workflows/extract-archive.yml
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m "Extract project archive and remove temporary builder"
+            git push
+          fi
