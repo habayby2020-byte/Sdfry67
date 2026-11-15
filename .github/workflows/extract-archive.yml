@@ -1,0 +1,64 @@
+name: Extract Swwd archive
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Swwd-main.zip'
+      - '.github/workflows/extract-archive.yml'
+permissions:
+  contents: write
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Extract archive and verify files
+        run: |
+          python3 - <<'PY'
+          import zipfile, pathlib, shutil
+          archive = pathlib.Path("Swwd-main.zip")
+          with zipfile.ZipFile(archive) as z:
+              bad = z.testzip()
+              if bad:
+                  raise SystemExit(f"ZIP integrity error: {bad}")
+              names = [n for n in z.namelist() if n and not n.endswith("/")]
+              # Strip one common wrapper directory if every file is inside it.
+              parts = [n.split("/") for n in names]
+              common = parts[0][0] if parts and all(len(p)>1 and p[0]==parts[0][0] for p in parts) else None
+              extracted = 0
+              for info in z.infolist():
+                  if info.is_dir():
+                      continue
+                  p = pathlib.PurePosixPath(info.filename)
+                  if p.is_absolute() or ".." in p.parts:
+                      raise SystemExit(f"Unsafe ZIP path: {info.filename}")
+                  rel = pathlib.Path(*p.parts[1:]) if common else pathlib.Path(*p.parts)
+                  if not rel.parts:
+                      continue
+                  # Keep original workflows as source files; the GitHub App token
+                  # cannot add files under .github/workflows without workflows:write.
+                  target = pathlib.Path(*rel.parts)
+                  if rel.parts[:2] == (".github", "workflows"):
+                      target = pathlib.Path("workflow-source", *rel.parts)
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  with z.open(info) as src, target.open("wb") as dst:
+                      shutil.copyfileobj(src, dst)
+                  extracted += 1
+              print(f"ZIP OK; extracted {extracted} files.")
+              if extracted != len(names):
+                  raise SystemExit(f"Count mismatch: {extracted} extracted, {len(names)} expected")
+          PY
+      - name: Commit extracted files and remove temporary extractor
+        run: |
+          rm -f .github/workflows/extract-archive.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No extracted changes to commit."
+            exit 1
+          fi
+          git commit -m "Extract Swwd-main archive"
+          git push
