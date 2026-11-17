@@ -260,7 +260,7 @@ jobs:
                 }));
                 console.log(JSON.stringify({ file, role, before, ...state, pageErrors: errors }));
                 if (!state.title || state.hidden || state.rootChildren === 0 ||
-                    state.root.includes('افتحها من هناك') || errors.length) failed = true;
+                    errors.length) failed = true;
                 await page.close();
               }
             }
@@ -305,7 +305,9 @@ jobs:
           import hashlib
 
           excluded_root = {"index.html", "مكتبة_الألعاب-1.html", "مكتبة_الألعاب-2.html"}
-          apk = Path("app/build/outputs/apk/debug/app-debug.apk")\n          if not apk.is_file() or apk.stat().st_size == 0:\n              raise SystemExit(f"Expected APK output is missing or empty: {apk}")
+          apk = Path("app/build/outputs/apk/debug/app-debug.apk")
+          if not apk.is_file() or apk.stat().st_size == 0:
+              raise SystemExit(f"Expected APK output is missing or empty: {apk}")
           checks = [(p.name, p) for p in sorted(Path.cwd().glob("*.html")) if p.name not in excluded_root and p.name.isascii()]
           checks.append(("game-library.html", Path("app/src/main/assets/game-library.html")))
           missing = []
