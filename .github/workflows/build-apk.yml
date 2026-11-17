@@ -1,7 +1,9 @@
-name: Layali Riyadh APK (Manual Only)
+name: Layali Riyadh APK
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
 
 permissions:
   contents: write
