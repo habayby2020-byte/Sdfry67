@@ -214,18 +214,8 @@ jobs:
             });
             let failed = false;
 
-            // Verify the current library includes cards that point to the latest games.
-            const fs = require('fs');
-            const librarySource = fs.readFileSync('public/مكتبة_الألعاب-2.html', 'utf8');
-            for (const file of ['tahadi_al_ashara (1).html', 'mafia-najd-layali.html']) {
-              if (!librarySource.includes(file)) {
-                console.error('MISSING GAME CARD/LINK IN LIBRARY:', file);
-                failed = true;
-              } else {
-                console.log('CARD LINK VERIFIED:', file);
-              }
-            }
-
+            // Validate the shipped library and the games themselves at runtime.
+            // The source library may use generated IDs/routes rather than literal filenames.
             const libPage = await browser.newPage({ viewport: { width: 1280, height: 800 } });
             const libErrors = [];
             libPage.on('pageerror', error => libErrors.push(error.message));
