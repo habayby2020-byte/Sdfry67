@@ -459,7 +459,7 @@ function renderPhoneUI(){
     const sel = phSelectedId===p.id ? ' selected' : '';
     const dead = !p.alive ? ' dead' : '';
     const dis = (!canPick || !p.alive || (me && p.id===me.id && phase!=='night_doctor')) ? ' disabled' : '';
-    return '<button class="house-btn' + sel + dead + '" ' + dis + ' onclick="pickPhTarget('' + p.id + '')">' +
+    return '<button class="house-btn' + sel + dead + '" ' + dis + ' onclick="pickPhTarget(\\'' + p.id + '\\')">' +
       '<span class="house-name">' + (p.alive ? p.name : p.name + ' ✕') + '</span>' +
       '<span style="font-size:18px">' + (p.alive ? '🏠' : '🕯️') + '</span>' +
     '</button>';
