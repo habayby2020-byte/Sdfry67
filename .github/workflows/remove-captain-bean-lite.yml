@@ -1,0 +1,83 @@
+name: Remove Captain Bean Lite
+
+on:
+  push:
+    paths:
+      - ".github/run-lite-cleanup"
+
+permissions:
+  contents: write
+
+jobs:
+  remove-lite:
+    if: contains(github.event.head_commit.message, 'RUN-LITE-CLEANUP')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - name: Remove only the Lite game entry from the library
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path("public/مكتبة_الألعاب-2.html")
+          text = path.read_text(encoding="utf-8")
+          marker = '"id": "captain_bean_lite"'
+          pos = text.find(marker)
+          if pos < 0:
+              raise SystemExit("Captain Bean Lite entry not found; nothing changed.")
+
+          start = text.rfind("{", 0, pos)
+          depth = 0
+          in_string = False
+          escaped = False
+          end = None
+          for i in range(start, len(text)):
+              ch = text[i]
+              if in_string:
+                  if escaped:
+                      escaped = False
+                  elif ch == "\\\\":
+                      escaped = True
+                  elif ch == '"':
+                      in_string = False
+                  continue
+              if ch == '"':
+                  in_string = True
+              elif ch == "{":
+                  depth += 1
+              elif ch == "}":
+                  depth -= 1
+                  if depth == 0:
+                      end = i + 1
+                      break
+
+          if end is None:
+              raise SystemExit("Could not safely locate the Lite entry boundaries.")
+
+          entry = text[start:end]
+          if '"name": "كابتن فاصوليا: رحلة الفوضى (الخفيفة)"' not in entry:
+              raise SystemExit("Lite name check failed; refusing to edit.")
+          remove_start = start
+          while remove_start > 0 and text[remove_start - 1].isspace():
+              remove_start -= 1
+          if remove_start > 0 and text[remove_start - 1] == ",":
+              remove_start -= 1
+
+          updated = text[:remove_start] + text[end:]
+          if marker in updated or "كابتن فاصوليا: رحلة الفوضى (الخفيفة)" in updated:
+              raise SystemExit("Lite entry still appears after edit.")
+          if '"id": "captain_bean"' not in updated or '"name": "كابتن فاصوليا: رحلة الفوضى"' not in updated:
+              raise SystemExit("Original Captain Bean game was not preserved.")
+
+          path.write_text(updated, encoding="utf-8")
+          Path(".github/run-lite-cleanup").unlink(missing_ok=True)
+
+      - name: Commit and push cleanup
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "public/مكتبة_الألعاب-2.html" ".github/run-lite-cleanup"
+          git commit -m "Remove Captain Bean Lite card and embedded game"
+          git push
