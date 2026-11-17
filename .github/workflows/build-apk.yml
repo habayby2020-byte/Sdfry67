@@ -277,7 +277,22 @@ jobs:
           fi
 
       - name: Build APK only
-        run: gradle --no-daemon assembleDebug
+        shell: bash
+        run: |
+          echo "Gradle project: $GITHUB_WORKSPACE"
+          test -f settings.gradle || { echo "Missing settings.gradle at repository root" >&2; exit 1; }
+          test -f app/build.gradle || { echo "Missing app/build.gradle" >&2; exit 1; }
+          gradle --no-daemon --stacktrace -p "$GITHUB_WORKSPACE" :app:assembleDebug
+          APK_DIR="$GITHUB_WORKSPACE/app/build/outputs/apk/debug"
+          mkdir -p "$APK_DIR"
+          APK_FILE="$APK_DIR/app-debug.apk"
+          if [ ! -s "$APK_FILE" ]; then
+            echo "APK output missing or empty: $APK_FILE" >&2
+            find "$GITHUB_WORKSPACE/app/build/outputs" -maxdepth 5 -type f -print 2>/dev/null || true
+            exit 1
+          fi
+          echo "APK_OUTPUT=$APK_FILE" >> "$GITHUB_ENV"
+          ls -lh "$APK_FILE"
 
       - name: Verify all repository game files are packaged in the APK
         shell: bash
@@ -288,7 +303,7 @@ jobs:
           import hashlib
 
           excluded_root = {"index.html", "مكتبة_الألعاب-1.html", "مكتبة_الألعاب-2.html"}
-          apk = next(Path("app/build/outputs/apk/debug").glob("*.apk"))
+          apk = Path("app/build/outputs/apk/debug/app-debug.apk")\n          if not apk.is_file() or apk.stat().st_size == 0:\n              raise SystemExit(f"Expected APK output is missing or empty: {apk}")
           checks = [(p.name, p) for p in sorted(Path.cwd().glob("*.html")) if p.name not in excluded_root and p.name.isascii()]
           checks.append(("game-library.html", Path("app/src/main/assets/game-library.html")))
           missing = []
@@ -343,7 +358,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          APK_FILE="$(ls app/build/outputs/apk/debug/*.apk | head -n 1)"
+          APK_FILE="${APK_OUTPUT:-$GITHUB_WORKSPACE/app/build/outputs/apk/debug/app-debug.apk}"
           if [ -z "$APK_FILE" ] || [ ! -f "$APK_FILE" ]; then
             echo "APK file not found" >&2
             exit 1
@@ -365,7 +380,7 @@ jobs:
         with:
           name: Layali-Riyadh-APK
           path: |
-            app/build/outputs/apk/debug/*.apk
+            app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
           retention-days: 1
           compression-level: 9
